@@ -17,8 +17,7 @@ class MoneroMessageHandler(
     private val onAddressShared: (address: String, fromUser: String) -> Unit,
     private val onPaymentRequested: (MoneroPaymentRequest) -> Unit,
     private val onPaymentStatusUpdated: (txId: String, status: String) -> Unit,
-    private val onTransactionIdReceived: (TransactionIdMessage) -> Unit,
-    private val onTransactionSearchRequested: (SearchTransactionRequest) -> Unit
+    private val onTransactionIdReceived: (TransactionIdMessage) -> Unit
 ) {
 
     interface MoneroMessageListener {
@@ -27,7 +26,6 @@ class MoneroMessageHandler(
         fun onPaymentRequested(request: MoneroPaymentRequest)
         fun onPaymentStatusUpdated(txId: String, status: String)
         fun onTransactionIdReceived(txIdMessage: TransactionIdMessage)
-        fun onTransactionSearchRequested(request: SearchTransactionRequest)
     }
 
     // Prefix-style message types (legacy)
@@ -39,9 +37,9 @@ class MoneroMessageHandler(
         const val TYPE_ADDRESS_REQUEST = "[REQUEST_MONERO_ADDRESS]"
 
         const val TYPE_TRANSACTION_ID = "[MONERO_TXID]"
-        const val TYPE_TRANSACTION_SEARCH = "[MONERO_SEARCH_TX]"
         const val TYPE_TRANSACTION_FOUND = "[MONERO_TX_FOUND]"
         const val TYPE_TRANSACTION_NOT_FOUND = "[MONERO_TX_NOT_FOUND]"
+        const val TYPE_TRANSACTION_BLOB = "[XMR_TX_BLOB]"
 
         // JSON type-based message types (new)
         const val TYPE_MONERO_PAYMENT = "monero_payment"
@@ -117,10 +115,6 @@ class MoneroMessageHandler(
                 onTransactionIdReceived = { txIdMsg -> 
                     listener.onTransactionIdReceived(txIdMsg)
                     Unit
-                },
-                onTransactionSearchRequested = { request -> 
-                    listener.onTransactionSearchRequested(request)
-                    Unit
                 }
             ).also {
                 Log.i("MoneroWalletHandler", "✅ MoneroMessageHandler initialized")
@@ -175,13 +169,6 @@ class MoneroMessageHandler(
     }
 
 
-    data class SearchTransactionRequest(
-        val txId: String,
-        val query: String,
-        val fromUser: String,
-        val timestamp: Long
-    )
-
     data class TransactionFoundMessage(
         val txId: String,
         val amount: String,
@@ -194,19 +181,22 @@ class MoneroMessageHandler(
      */
     fun processMoneroMessage(message: BitchatMessage): Boolean {
         val content = message.content
+        // Peer IDs are the routing identity. Nicknames are mutable display
+        // labels and must never be used for transaction acknowledgements.
+        val sender = message.senderPeerID ?: message.sender
 
         // Legacy [PREFIX]-style parsing
         when {
             content.startsWith(TYPE_PAYMENT) -> {
-                handlePaymentMessage(content, message.sender)
+                handlePaymentMessage(content, sender)
                 return true
             }
             content.startsWith(TYPE_ADDRESS_SHARE) -> {
-                handleAddressShare(content, message.sender)
+                handleAddressShare(content, sender)
                 return true
             }
             content.startsWith(TYPE_PAYMENT_REQUEST) -> {
-                handlePaymentRequest(content, message.sender)
+                handlePaymentRequest(content, sender)
                 return true
             }
             content.startsWith(TYPE_PAYMENT_STATUS) -> {
@@ -214,11 +204,8 @@ class MoneroMessageHandler(
                 return true
             }
             content.startsWith(TYPE_TRANSACTION_ID) -> {
-                handleTransactionId(content, message.sender)
-                return true
-            }
-            content.startsWith(TYPE_TRANSACTION_SEARCH) -> {
-                handleTransactionSearch(content, message.sender)
+                // Replies must target the stable peer id, not a display nickname.
+                handleTransactionId(content, sender)
                 return true
             }
             content.startsWith(TYPE_TRANSACTION_FOUND) -> {
@@ -227,6 +214,19 @@ class MoneroMessageHandler(
             }
             content.startsWith(TYPE_TRANSACTION_NOT_FOUND) -> {
                 handleTransactionNotFound(content)
+                return true
+            }
+            content.startsWith(TYPE_TRANSACTION_BLOB) -> {
+                val blob = content.removePrefix(TYPE_TRANSACTION_BLOB).trim()
+                if (blob.isEmpty()) return true
+                onPaymentReceived(
+                    MoneroPaymentMessage(
+                        amount = "unknown",
+                        fromUser = sender,
+                        signedTxBlob = blob,
+                        timestamp = message.timestamp.time
+                    )
+                )
                 return true
             }
         }
@@ -238,10 +238,10 @@ class MoneroMessageHandler(
                 TYPE_MONERO_PAYMENT -> {
                     val payment = MoneroPaymentMessage(
                         amount = json.getString("amount"),
-                        txId = json.optString("tx_id", null),
-                        toAddress = json.optString("recipient_address", null),
-                        fromUser = message.sender,
-                        signedTxBlob = json.optString("signed_tx", null),
+                        txId = json.optString("tx_id").takeIf { it.isNotEmpty() },
+                        toAddress = json.optString("recipient_address").takeIf { it.isNotEmpty() },
+                        fromUser = sender,
+                        signedTxBlob = json.optString("signed_tx").takeIf { it.isNotEmpty() },
                         timestamp = json.getLong("timestamp"),
                         status = json.optString("status", STATUS_PENDING)
                     )
@@ -250,7 +250,7 @@ class MoneroMessageHandler(
                 }
                 TYPE_MONERO_ADDRESS_SHARE -> {
                     val address = json.getString("address")
-                    onAddressShared(address, message.sender)
+                    onAddressShared(address, sender)
                     true
                 }
                 TYPE_MONERO_PAYMENT_REQUEST -> {
@@ -258,7 +258,7 @@ class MoneroMessageHandler(
                         amount = json.getString("amount"),
                         reason = json.optString("reason", ""),
                         timestamp = json.getLong("timestamp"),
-                        fromUser = message.sender
+                        fromUser = sender
                     )
                     onPaymentRequested(request)
                     true
@@ -345,26 +345,17 @@ class MoneroMessageHandler(
         }
     }
 
-    private fun handleTransactionSearch(content: String, sender: String) {
-        try {
-            val json = JSONObject(content.substring(TYPE_TRANSACTION_SEARCH.length))
-            val searchRequest = SearchTransactionRequest(
-                txId = json.getString("tx_id"),
-                query = content,
-                fromUser = sender,
-                timestamp = json.getLong("timestamp")
-            )
-            onTransactionSearchRequested(searchRequest)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to parse transaction search request: ${e.message}")
-        }
-    }
-
     private fun handleTransactionFound(content: String) {
         try {
             val json = JSONObject(content.substring(TYPE_TRANSACTION_FOUND.length))
             val txId = json.getString("tx_id")
-            val status = "Found: ${json.getInt("confirmations")} confirmations"
+            val amount = json.optString("amount", "")
+            val confirmations = json.optLong("confirmations", 0L)
+            val status = if (amount.isNotBlank()) {
+                "Found: $amount XMR, $confirmations confirmations"
+            } else {
+                "Found: $confirmations confirmations"
+            }
             onPaymentStatusUpdated(txId, status)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse transaction found message: ${e.message}")
@@ -428,17 +419,15 @@ class MoneroMessageHandler(
             put("amount", amount)
             put("to_address", toAddress)
             put("timestamp", System.currentTimeMillis())
-            put("block_height", blockHeight)
+            // The sender does not know the mined block yet. Omitting the
+            // optional zero value keeps the announcement within the legacy
+            // one-byte TLV limit used by Bitchat/iOS. The receiver obtains
+            // the authoritative block height during wallet lookup.
+            if (blockHeight > 0) {
+                put("block_height", blockHeight)
+            }
         }
         return "$TYPE_TRANSACTION_ID$json"
-    }
-
-    fun createTransactionSearchMessage(txId: String): String {
-        val json = JSONObject().apply {
-            put("tx_id", txId)
-            put("timestamp", System.currentTimeMillis())
-        }
-        return "$TYPE_TRANSACTION_SEARCH$json"
     }
 
     fun createTransactionFoundMessage(
@@ -465,4 +454,3 @@ class MoneroMessageHandler(
         return "$TYPE_TRANSACTION_NOT_FOUND$json"
     }
 }
-

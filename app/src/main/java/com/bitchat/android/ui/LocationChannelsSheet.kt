@@ -74,6 +74,14 @@ fun LocationChannelsSheet(
     // Observe reactive participant counts
     val geohashParticipantCounts by viewModel.geohashParticipantCounts.collectAsStateWithLifecycle()
 
+    // The process-wide location manager may have been created before the user granted the
+    // runtime permission. Refresh it whenever this sheet is opened.
+    LaunchedEffect(isPresented) {
+        if (isPresented) {
+            locationManager.refreshPermissionState()
+        }
+    }
+
     // UI state
     var customGeohash by remember { mutableStateOf("") }
     var customError by remember { mutableStateOf<String?>(null) }

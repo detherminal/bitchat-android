@@ -3,9 +3,14 @@ name: Android CI
 on:
   workflow_dispatch:
   push:
-    branches: [ "main", "develop" ]
   pull_request:
-    branches: [ "main", "develop" ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   verify:
@@ -16,33 +21,36 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Set up JDK 17
-      uses: actions/setup-java@v4
+    - name: Set up JDK 21
+      uses: actions/setup-java@v5
       with:
-        java-version: '17'
+        java-version: '21'
         distribution: 'temurin'
 
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v4
+
+    - name: Install Android SDK components
+      run: |
+        sdkmanager --install \
+          "platform-tools" \
+          "platforms;android-35" \
+          "build-tools;35.0.0" \
+          "ndk;28.0.13004108"
+
     - name: Setup Gradle
-      uses: gradle/gradle-build-action@v3
+      uses: gradle/actions/setup-gradle@v6
+      with:
+        cache-provider: basic
 
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
 
-    - name: Cache Gradle packages
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.gradle/caches
-          ~/.gradle/wrapper
-        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-        restore-keys: |
-          ${{ runner.os }}-gradle-
-
     - name: Run unit tests
-      run: ./gradlew testDebugUnitTest
+      run: ./gradlew --no-daemon --stacktrace -Djava.net.preferIPv4Stack=true testDebugUnitTest
 
     - name: Run lint
-      run: ./gradlew lintDebug
+      run: ./gradlew --no-daemon --stacktrace -Djava.net.preferIPv4Stack=true lintDebug
 
     - name: Upload test reports
       if: always()
@@ -72,30 +80,33 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Set up JDK 17
-      uses: actions/setup-java@v4
+    - name: Set up JDK 21
+      uses: actions/setup-java@v5
       with:
-        java-version: '17'
+        java-version: '21'
         distribution: 'temurin'
 
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v4
+
+    - name: Install Android SDK components
+      run: |
+        sdkmanager --install \
+          "platform-tools" \
+          "platforms;android-35" \
+          "build-tools;35.0.0" \
+          "ndk;28.0.13004108"
+
     - name: Setup Gradle
-      uses: gradle/gradle-build-action@v3
+      uses: gradle/actions/setup-gradle@v6
+      with:
+        cache-provider: basic
 
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
 
-    - name: Cache Gradle packages
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.gradle/caches
-          ~/.gradle/wrapper
-        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-        restore-keys: |
-          ${{ runner.os }}-gradle-
-
     - name: Build ${{ matrix.variant }} APK
-      run: ./gradlew assemble${{ matrix.variant }}
+      run: ./gradlew --no-daemon --stacktrace -Djava.net.preferIPv4Stack=true assemble${{ matrix.variant }}
 
     - name: Upload ${{ matrix.variant }} APK
       uses: actions/upload-artifact@v4

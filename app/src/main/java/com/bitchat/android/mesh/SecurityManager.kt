@@ -65,7 +65,10 @@ class SecurityManager(private val encryptionService: EncryptionService, private 
                     packet.ttl >= com.bitchat.android.util.AppConstants.MESSAGE_TTL_HOPS
 
             if (!isFreshAnnounce) {
-                Log.d(TAG, "Dropping duplicate packet: $messageID")
+                // Duplicate packets are expected on a multi-path mesh (for example,
+                // when the same packet arrives over more than one BLE connection).
+                // Keep this at debug level; it is not a cryptographic failure.
+                Log.d(TAG, "Ignoring duplicate packet: $messageID")
                 return false
             }
             Log.d(TAG, "Allowing duplicate ANNOUNCE from direct neighbor: $messageID")

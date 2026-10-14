@@ -164,6 +164,15 @@ class LocationChannelManager private constructor(private val context: Context) {
     }
 
     /**
+     * Re-read the Android runtime permission after returning from Settings or onboarding.
+     * The manager is process-wide and can outlive the permission grant that created it.
+     */
+    fun refreshPermissionState(): PermissionState {
+        checkAndSyncPermission()
+        return _permissionState.value
+    }
+
+    /**
      * Refresh available channels from current location
      */
     fun refreshChannels() {

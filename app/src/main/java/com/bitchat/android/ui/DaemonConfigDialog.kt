@@ -13,6 +13,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -26,12 +27,13 @@ import java.io.FileOutputStream
 import java.util.Properties
 
 data class DaemonConfig(
-    val host: String = "node.moneroworld.com",
-    val port: String = "18089",
+    val host: String = "xmr-node.cakewallet.com",
+    val port: String = "18081",
     val username: String = "",
     val password: String = "",
-    val ssl: Boolean = true,
-    val networkType: String = "mainnet"
+    val ssl: Boolean = false,
+    val autoSync: Boolean = true,
+    val networkType: String = "0"
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -50,6 +52,7 @@ fun DaemonConfigDialog(
     var username by remember { mutableStateOf(initialConfig.username) }
     var password by remember { mutableStateOf(initialConfig.password) }
     var ssl by remember { mutableStateOf(initialConfig.ssl) }
+    var autoSync by remember { mutableStateOf(initialConfig.autoSync) }
     var networkType by remember { mutableStateOf(initialConfig.networkType) }
     var showPassword by remember { mutableStateOf(false) }
     var isTestingConnection by remember { mutableStateOf(false) }
@@ -63,14 +66,14 @@ fun DaemonConfigDialog(
         onDismissRequest = { if (!isLoading) onDismiss() },
         properties = DialogProperties(
             dismissOnBackPress = !isLoading,
-            dismissOnClickOutside = !isLoading
+            dismissOnClickOutside = !isLoading,
+            usePlatformDefaultWidth = false
         )
     ) {
         Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+            modifier = Modifier.fillMaxSize(),
+            shape = RectangleShape,
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
         ) {
             Column(
                 modifier = Modifier
@@ -97,7 +100,7 @@ fun DaemonConfigDialog(
                     value = host,
                     onValueChange = { host = it.trim() },
                     label = { Text("Daemon Host") },
-                    placeholder = { Text("node.moneroworld.com") },
+                    placeholder = { Text("xmr-node.cakewallet.com") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     enabled = !isLoading
@@ -171,6 +174,23 @@ fun DaemonConfigDialog(
                     )
                 }
 
+                // AutoSync checkbox
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(
+                        checked = autoSync,
+                        onCheckedChange = { autoSync = it },
+                        enabled = !isLoading
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Enable Automatic Sync",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+
                 // Network type dropdown
                 var expanded by remember { mutableStateOf(false) }
                 val networkOptions = listOf("mainnet", "testnet", "stagenet")
@@ -230,6 +250,7 @@ fun DaemonConfigDialog(
                                 username = username,
                                 password = password,
                                 ssl = ssl,
+                                autoSync = autoSync,
                                 networkType = networkType
                             )
                             onSave(config)
@@ -262,7 +283,13 @@ fun saveDaemonConfig(context: Context, config: DaemonConfig): Boolean {
             setProperty("daemon.address", config.host)
             setProperty("daemon.port", config.port)
             setProperty("daemon.ssl", config.ssl.toString())
-            setProperty("wallet.networktype", config.networkType)
+            setProperty("daemon.autosync", config.autoSync.toString())
+            val netInt = when (config.networkType.lowercase()) {
+                "testnet" -> "1"
+                "stagenet" -> "2"
+                else -> "0"
+            }
+            setProperty("network.type", netInt)
         }
 
         // Save to external storage first (user accessible)
@@ -342,13 +369,21 @@ fun loadDaemonConfig(context: Context): DaemonConfig {
             Log.w("DaemonConfig", "Could not load encrypted credentials, using empty", e)
         }
 
+        val netProp = properties.getProperty("network.type", "0")
+        val netStr = when (netProp) {
+            "1" -> "testnet"
+            "2" -> "stagenet"
+            else -> "mainnet"
+        }
+
         DaemonConfig(
-            host = properties.getProperty("daemon.address", "node.moneroworld.com"),
-            port = properties.getProperty("daemon.port", "18089"),
+            host = properties.getProperty("daemon.address", "xmr-node.cakewallet.com"),
+            port = properties.getProperty("daemon.port", "18081"),
             username = username,
             password = password,
-            ssl = properties.getProperty("daemon.ssl", "true").toBoolean(),
-            networkType = properties.getProperty("wallet.networktype", "mainnet")
+            ssl = properties.getProperty("daemon.ssl", "false").toBoolean(),
+            autoSync = properties.getProperty("daemon.autosync", "true").toBoolean(),
+            networkType = netStr
         )
     } catch (e: Exception) {
         Log.w("DaemonConfig", "Failed to load daemon config, using defaults", e)

@@ -171,6 +171,11 @@ fun MessageInput(
     currentChannel: String?,
     nickname: String,
     showMediaButtons: Boolean,
+    isMoneroModeActive: Boolean = false,
+    onMoneroModeToggle: () -> Unit = {},
+    onMoneroAddressShare: () -> Unit = {},
+    canReceiveMonero: Boolean = false,
+    isWalletReady: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val colorScheme = MaterialTheme.colorScheme
@@ -181,6 +186,7 @@ fun MessageInput(
     var isRecording by remember { mutableStateOf(false) }
     var elapsedMs by remember { mutableStateOf(0L) }
     var amplitude by remember { mutableStateOf(0) }
+    var showMoneroActions by remember { mutableStateOf(false) }
 
     Row(
         modifier = modifier.padding(horizontal = 12.dp, vertical = 8.dp), // Reduced padding
@@ -218,7 +224,7 @@ fun MessageInput(
             // Show placeholder when there's no text and not recording
             if (value.text.isEmpty() && !isRecording) {
                 Text(
-                    text = stringResource(R.string.type_a_message_placeholder),
+                    text = if (isMoneroModeActive) "Enter XMR amount" else stringResource(R.string.type_a_message_placeholder),
                     style = MaterialTheme.typography.bodyMedium.copy(
                         fontFamily = FontFamily.Monospace
                     ),
@@ -252,9 +258,65 @@ fun MessageInput(
         }
         
         Spacer(modifier = Modifier.width(8.dp)) // Reduced spacing
+
+        // Keep Monero actions in one compact menu so the composer stays focused
+        // on writing messages and media controls.
+        if (selectedPrivatePeer != null) {
+            Box {
+                IconButton(
+                    onClick = { showMoneroActions = true },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.AccountBalanceWallet,
+                        contentDescription = if (isWalletReady) {
+                            "Monero actions"
+                        } else {
+                            "Monero actions; wallet is loading"
+                        },
+                        modifier = Modifier.size(20.dp),
+                        tint = when {
+                            isMoneroModeActive -> Color(0xFFFF9500)
+                            isWalletReady -> colorScheme.onSurfaceVariant
+                            else -> colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+                        }
+                    )
+                }
+
+                DropdownMenu(
+                    expanded = showMoneroActions,
+                    onDismissRequest = { showMoneroActions = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Share wallet address") },
+                        leadingIcon = {
+                            Icon(Icons.Filled.Share, contentDescription = null)
+                        },
+                        onClick = {
+                            showMoneroActions = false
+                            onMoneroAddressShare()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(if (isMoneroModeActive) "Exit XMR mode" else "Send XMR")
+                        },
+                        enabled = isWalletReady,
+                        leadingIcon = {
+                            Icon(Icons.Filled.AccountBalanceWallet, contentDescription = null)
+                        },
+                        onClick = {
+                            showMoneroActions = false
+                            onMoneroModeToggle()
+                        }
+                    )
+                }
+            }
+        }
         
-        // Voice and image buttons when no text (only visible in Mesh chat)
-        if (value.text.isEmpty() && showMediaButtons) {
+        // Voice and image buttons when no text (only visible in Mesh chat and
+        // never while the composer is explicitly in payment mode).
+        if (value.text.isEmpty() && showMediaButtons && !isMoneroModeActive) {
             // Hold-to-record microphone
             val bg = if (colorScheme.background == Color.Black) Color(0xFF00FF00).copy(alpha = 0.75f) else Color(0xFF008000).copy(alpha = 0.75f)
 

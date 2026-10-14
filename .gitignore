@@ -17,6 +17,8 @@ app/release
 # Gradle
 /build/
 /.gradle/
+/gradle_home/
+/.kotlin/
 /captures/
 *.apk
 *.aab

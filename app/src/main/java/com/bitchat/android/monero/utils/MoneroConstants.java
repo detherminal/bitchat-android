@@ -12,7 +12,7 @@ public final class MoneroConstants {
     public static final String STAGENET = "stagenet";
     
     // Default Monero nodes
-    public static final String DEFAULT_MAINNET_NODE = "node.moneroworld.com:18089";
+    public static final String DEFAULT_MAINNET_NODE = "xmr-node.cakewallet.com:18081";
     public static final String DEFAULT_TESTNET_NODE = "testnet.xmr-tw.org:28089";
     
     // Wallet file names

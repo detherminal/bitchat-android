@@ -27,11 +27,9 @@ import java.util.function.Consumer;
 import com.bitchat.android.model.UserProfile;
 import com.bitchat.android.monero.model.MoneroPayment;
 import com.bitchat.android.monero.model.MoneroPaymentRequest;
-import com.bitchat.android.monero.model.MoneroSearchRequest;
 import com.bitchat.android.monero.messaging.MoneroMessageHandler;
 import com.bitchat.android.monero.messaging.MoneroMessageHandler.MoneroPaymentMessage;
 import com.bitchat.android.monero.messaging.MoneroMessageHandler.TransactionIdMessage;
-import com.bitchat.android.monero.messaging.MoneroMessageHandler.SearchTransactionRequest;
 
 
 import java.util.ArrayList;
@@ -111,11 +109,6 @@ public class MoneroBluetoothService {
                 listener.onTransactionIdReceived(txIdMsg);
                 Log.i(TAG, "✅ onTransactionIdReceived: " + txIdMsg.toString());
                 return kotlin.Unit.INSTANCE; // Explicitly return Unit
-            },
-            (com.bitchat.android.monero.messaging.MoneroMessageHandler.SearchTransactionRequest request) -> {
-                listener.onTransactionSearchRequested(request);
-                Log.i(TAG, "✅ onTransactionSearchRequested: " + request.toString());
-                return kotlin.Unit.INSTANCE; // Explicitly return Unit
             }
         );
     }
@@ -152,9 +145,6 @@ public class MoneroBluetoothService {
             return "🆔 Transaction ID received: " + msg.getTxId();
         }
 
-        public String onTransactionSearchRequested(MoneroSearchRequest request) {
-            return "🔎 Searching for transaction " + request.getTxId();
-        }
     }
         
     private MoneroBluetoothService(Context context) {

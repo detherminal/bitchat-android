@@ -24,6 +24,7 @@ class NostrDirectMessageHandler(
     private val state: ChatState,
     private val privateChatManager: PrivateChatManager,
     private val meshDelegateHandler: MeshDelegateHandler,
+    private val onMoneroAddressReceived: (peerId: String, address: String) -> Unit,
     private val scope: CoroutineScope,
     private val repo: GeohashRepository,
     private val dataManager: com.bitchat.android.ui.DataManager
@@ -139,6 +140,19 @@ class NostrDirectMessageHandler(
 
                 withContext(Dispatchers.Main) {
                     privateChatManager.handleIncomingPrivateMessage(message, suppressUnread)
+
+                    // Nostr DMs enter through this handler instead of the mesh
+                    // delegate, so ChatViewModel.didReceiveMessage() never sees
+                    // Monero address shares. Keep the normal private-chat echo,
+                    // but also update the payment state for this conversation.
+                    if (pm.content.startsWith("[MONERO_ADDRESS]")) {
+                        val address = pm.content.removePrefix("[MONERO_ADDRESS]").trim()
+                        if (com.bitchat.android.monero.utils.MoneroValidator.isValidAddress(address)) {
+                            onMoneroAddressReceived(convKey, address)
+                        } else {
+                            Log.w(TAG, "Ignoring invalid Monero address from $convKey")
+                        }
+                    }
                 }
 
                 if (!seenStore.hasDelivered(pm.messageID)) {

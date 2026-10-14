@@ -21,6 +21,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.style.TextOverflow
@@ -34,6 +35,9 @@ import com.bitchat.android.geohash.ChannelID
 import com.bitchat.android.ui.theme.BASE_FONT_SIZE
 import com.bitchat.android.nostr.GeohashAliasRegistry
 import com.bitchat.android.nostr.GeohashConversationRegistry
+import com.bitchat.android.monero.utils.MoneroValidator
+import com.bitchat.android.monero.wallet.WalletSuite
+import java.math.BigDecimal
 
 
 /**
@@ -48,6 +52,8 @@ fun MeshPeerListSheet(
     viewModel: ChatViewModel,
     onDismiss: () -> Unit,
     onShowVerification: () -> Unit,
+    onShowRestoreWalletDialog: () -> Unit = {},
+    onShowTransactionHistory: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val colorScheme = MaterialTheme.colorScheme
@@ -63,10 +69,6 @@ fun MeshPeerListSheet(
     val selectedLocationChannel by viewModel.selectedLocationChannel.collectAsStateWithLifecycle()
     val wifiAwareConnected by com.bitchat.android.wifiaware.WifiAwareController.connectedPeers.collectAsStateWithLifecycle()
     val wifiAwarePeerIDs = remember(wifiAwareConnected) { wifiAwareConnected.keys.toSet() }
-    val pendingTransactions by viewModel.pendingTransactionSearches.collectAsStateWithLifecycle()
-    var showTransactionSearchDialog by remember { mutableStateOf(false) }
-    var showPendingTransactionsSheet by remember { mutableStateOf(false) }
-
     // Bottom sheet state
     val sheetState = rememberModalBottomSheetState(
         skipPartiallyExpanded = true
@@ -90,8 +92,9 @@ fun MeshPeerListSheet(
             onDismissRequest = onDismiss,
             sheetState = sheetState,
         ) {
-            Box(modifier = Modifier.fillMaxWidth()) {
-                LazyColumn(
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Box(modifier = Modifier.weight(1f, fill = false).fillMaxWidth()) {
+                    LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(top = 64.dp, bottom = 20.dp)
@@ -180,17 +183,17 @@ fun MeshPeerListSheet(
                     item(key = "monero_tools") {
                         HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                         MoneroToolsSection(
-                            pendingCount = pendingTransactions.size,
-                            onSearchClick = {
-                                showTransactionSearchDialog = true
+                            onHistoryClick = {
+                                onShowTransactionHistory()
                                 onDismiss()
                             },
-                            onPendingClick = {
-                                showPendingTransactionsSheet = true
+                            onSettingsClick = {
+                                viewModel.showDaemonConfigDialog()
                                 onDismiss()
                             }
                         )
                     }
+                    // Removed Wallet details from here
                 }
 
                 // TopBar (animated)
@@ -217,9 +220,18 @@ fun MeshPeerListSheet(
                     onClose = onDismiss,
                 )
             }
-        }
 
+            if (viewModel.isWalletReady) {
+                HorizontalDivider()
+                WalletDetailsSection(
+                    viewModel = viewModel,
+                    onShowRestoreWalletDialog = onShowRestoreWalletDialog
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+        }
     }
+}
 }
 
 @Composable
@@ -843,6 +855,121 @@ fun PrivateChatSheet(
         viewModel.isPeerVerified(peerID, verifiedFingerprints)
     }
 
+    // The private-chat sheet is the actual Nostr DM composer. Keep its
+    // Monero state here as well; the main ChatScreen composer is not used
+    // while this sheet is visible.
+    val peerMoneroAddresses by viewModel.peerMoneroAddresses
+    val isWalletReady = viewModel.isWalletReady
+    val myWalletAddress by viewModel.myWalletAddress.collectAsStateWithLifecycle()
+    val canReceiveMonero = isWalletReady && peerMoneroAddresses.containsKey(peerID)
+    val isMoneroModeActive = viewModel.isMoneroModeActive
+    var showMoneroConfirmDialog by remember { mutableStateOf(false) }
+    var pendingMoneroAmount by remember { mutableStateOf("") }
+    var pendingMoneroFeeAtomic by remember { mutableStateOf<Long?>(null) }
+    var pendingMoneroAddress by remember { mutableStateOf("") }
+    var isPreparingMoneroTransaction by remember { mutableStateOf(false) }
+    var isMoneroSendInProgress by remember { mutableStateOf(false) }
+
+    fun addMoneroStatus(message: String) {
+        viewModel.addPrivateSystemMessage(peerID, message)
+    }
+
+    fun moneroAmountToAtomic(input: String): Long? = runCatching {
+        BigDecimal(input).movePointRight(12).longValueExact()
+    }.getOrNull()
+
+    fun parseMoneroAmountInput(input: String): String? {
+        val trimmed = input.trim()
+        val match = Regex("""^(?:\d+(?:[.,]\d{1,12})?|[.,]\d{1,12})$""").matches(trimmed)
+        if (!match) return null
+        return runCatching {
+            val normalized = trimmed.replace(',', '.')
+            if (BigDecimal(normalized).signum() > 0) normalized else null
+        }.getOrNull()
+    }
+
+    fun prepareMoneroTransaction(rawText: String, onTextConsumed: () -> Unit) {
+        val address = peerMoneroAddresses[peerID]
+        val amountText = parseMoneroAmountInput(rawText)
+        if (!canReceiveMonero || address == null) {
+            addMoneroStatus("❌ Monero can only be sent after the recipient shares an address")
+            return
+        }
+        if (amountText == null) {
+            addMoneroStatus("❌ Invalid XMR amount")
+            return
+        }
+        if (!MoneroValidator.isValidAddress(address)) {
+            addMoneroStatus("❌ Recipient address is invalid")
+            return
+        }
+        val validation = MoneroValidator.validateAmount(amountText)
+        val amountAtomic = moneroAmountToAtomic(amountText)
+        if (!validation.isValid()) {
+            addMoneroStatus("❌ ${validation.message}")
+            return
+        }
+        if (amountAtomic == null) {
+            addMoneroStatus("❌ Invalid XMR amount")
+            return
+        }
+        if (isPreparingMoneroTransaction || isMoneroSendInProgress) {
+            addMoneroStatus("⏳ A Monero transaction is already being prepared")
+            return
+        }
+        if (amountAtomic > viewModel.getCachedUnlockedBalance()) {
+            addMoneroStatus(
+                "❌ Insufficient unlocked balance. Available: " +
+                    "${WalletSuite.convertAtomicToXmr(viewModel.getCachedUnlockedBalance())} XMR"
+            )
+            return
+        }
+
+        pendingMoneroAmount = amountText
+        pendingMoneroAddress = address
+        pendingMoneroFeeAtomic = null
+        isPreparingMoneroTransaction = true
+        onTextConsumed()
+        addMoneroStatus("⏳ Estimating Monero network fee...")
+
+        val activeWallet = viewModel.walletSuite
+        if (activeWallet == null) {
+            isPreparingMoneroTransaction = false
+            addMoneroStatus("❌ Wallet is not ready")
+            return
+        }
+        activeWallet.estimateTransactionFee(
+            address,
+            amountText,
+            object : WalletSuite.FeeEstimateCallback {
+                override fun onSuccess(feeAtomic: Long) {
+                    isPreparingMoneroTransaction = false
+                    val unlockedBalance = viewModel.getCachedUnlockedBalance()
+                    val totalAtomic = if (Long.MAX_VALUE - amountAtomic < feeAtomic) {
+                        Long.MAX_VALUE
+                    } else {
+                        amountAtomic + feeAtomic
+                    }
+                    if (totalAtomic > unlockedBalance) {
+                        addMoneroStatus(
+                            "❌ Insufficient unlocked balance including fee. Required: " +
+                                "${WalletSuite.convertAtomicToXmr(totalAtomic)} XMR, available: " +
+                                "${WalletSuite.convertAtomicToXmr(unlockedBalance)} XMR"
+                        )
+                    } else {
+                        pendingMoneroFeeAtomic = feeAtomic
+                        showMoneroConfirmDialog = true
+                    }
+                }
+
+                override fun onError(error: String) {
+                    isPreparingMoneroTransaction = false
+                    addMoneroStatus("❌ Could not estimate network fee: $error")
+                }
+            }
+        )
+    }
+
     val securityModifier = if (!isNostrPeer) {
         Modifier.clickable { viewModel.showSecurityVerificationSheet() }
     } else {
@@ -901,9 +1028,16 @@ fun PrivateChatSheet(
                             viewModel.updateMentionSuggestions(newText.text)
                         },
                         onSend = {
-                            if (messageText.text.trim().isNotEmpty()) {
-                                viewModel.sendMessage(messageText.text.trim())
-                                messageText = androidx.compose.ui.text.input.TextFieldValue("")
+                            val trimmedText = messageText.text.trim()
+                            if (trimmedText.isNotEmpty()) {
+                                if (isMoneroModeActive) {
+                                    prepareMoneroTransaction(trimmedText) {
+                                        messageText = TextFieldValue("")
+                                    }
+                                } else {
+                                    viewModel.sendMessage(trimmedText)
+                                    messageText = TextFieldValue("")
+                                }
                                 forceScrollToBottom = !forceScrollToBottom
                             }
                         },
@@ -926,7 +1060,23 @@ fun PrivateChatSheet(
                         currentChannel = null,
                         nickname = nickname,
                         colorScheme = colorScheme,
-                        showMediaButtons = true
+                        showMediaButtons = true,
+                        isMoneroModeActive = isMoneroModeActive,
+                        onMoneroAddressShare = {
+                            val address = myWalletAddress
+                            if (address != null && isWalletReady) {
+                                viewModel.shareMoneroAddressWithPeer(peerID, address)
+                            } else {
+                                addMoneroStatus("❌ Wallet address is not ready")
+                            }
+                        },
+                        onMoneroModeToggle = {
+                            if (isWalletReady && peerID.isNotBlank()) {
+                                viewModel.isMoneroModeActive = !isMoneroModeActive
+                            }
+                        },
+                        canReceiveMonero = canReceiveMonero,
+                        isWalletReady = isWalletReady
                     )
                 }
 
@@ -1039,15 +1189,109 @@ fun PrivateChatSheet(
             }
         }
     }
+
+    if (showMoneroConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!isMoneroSendInProgress) {
+                    showMoneroConfirmDialog = false
+                    pendingMoneroFeeAtomic = null
+                }
+            },
+            title = { Text("Confirm Monero Transaction") },
+            text = {
+                Column {
+                    Text("Amount: $pendingMoneroAmount XMR")
+                    pendingMoneroFeeAtomic?.let { feeAtomic ->
+                        Text("Estimated network fee: ${WalletSuite.convertAtomicToXmr(feeAtomic)} XMR")
+                        val amountAtomic = moneroAmountToAtomic(pendingMoneroAmount)
+                        if (amountAtomic != null && Long.MAX_VALUE - amountAtomic >= feeAtomic) {
+                            Text("Estimated total: ${WalletSuite.convertAtomicToXmr(amountAtomic + feeAtomic)} XMR")
+                        }
+                    }
+                    Text("Send to:")
+                    Text(
+                        text = if (pendingMoneroAddress.length > 20) {
+                            "${pendingMoneroAddress.take(10)}...${pendingMoneroAddress.takeLast(10)}"
+                        } else pendingMoneroAddress,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !isMoneroSendInProgress,
+                    onClick = {
+                        val amountAtomic = moneroAmountToAtomic(pendingMoneroAmount)
+                        val feeAtomic = pendingMoneroFeeAtomic
+                        val unlockedBalance = viewModel.getCachedUnlockedBalance()
+                        val totalAtomic = if (amountAtomic != null && feeAtomic != null && Long.MAX_VALUE - amountAtomic >= feeAtomic) {
+                            amountAtomic + feeAtomic
+                        } else Long.MAX_VALUE
+
+                        if (amountAtomic == null || feeAtomic == null || totalAtomic > unlockedBalance) {
+                            showMoneroConfirmDialog = false
+                            pendingMoneroFeeAtomic = null
+                            addMoneroStatus("❌ Balance or transaction details changed")
+                        } else {
+                            showMoneroConfirmDialog = false
+                            pendingMoneroFeeAtomic = null
+                            isMoneroSendInProgress = true
+                            viewModel.isMoneroModeActive = false
+                            addMoneroStatus("⏳ Preparing transaction of $pendingMoneroAmount XMR...")
+                            val activeWallet = viewModel.walletSuite
+                            if (activeWallet == null) {
+                                isMoneroSendInProgress = false
+                                addMoneroStatus("❌ Wallet is not ready")
+                            } else {
+                                activeWallet.sendTransaction(
+                                    pendingMoneroAddress,
+                                    pendingMoneroAmount,
+                                    viewModel.getCachedBalance(),
+                                    unlockedBalance,
+                                    object : WalletSuite.TransactionCallback {
+                                        override fun onSuccess(txId: String, sentAmount: Long) {
+                                            isMoneroSendInProgress = false
+                                            val sentAmountXmr = WalletSuite.convertAtomicToXmr(sentAmount)
+                                            addMoneroStatus("✅ Sent $sentAmountXmr XMR successfully")
+                                            val txMessage = viewModel.moneroMessageHandler.createTransactionIdMessage(
+                                                txId = txId,
+                                                amount = sentAmountXmr,
+                                                toAddress = pendingMoneroAddress
+                                            )
+                                            viewModel.sendDirectMessage(peerID, txMessage)
+                                        }
+
+                                        override fun onError(error: String) {
+                                            isMoneroSendInProgress = false
+                                            addMoneroStatus("❌ Transaction failed: $error")
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                ) { Text("Send") }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !isMoneroSendInProgress,
+                    onClick = {
+                        showMoneroConfirmDialog = false
+                        pendingMoneroFeeAtomic = null
+                    }
+                ) { Text("Cancel") }
+            }
+        )
+    }
 }
 
 // ── Monero tools added from SidebarComponents ────────────────────────────
 
 @Composable
 private fun MoneroToolsSection(
-    pendingCount: Int,
-    onSearchClick: () -> Unit,
-    onPendingClick: () -> Unit
+    onHistoryClick: () -> Unit,
+    onSettingsClick: () -> Unit
 ) {
     val colorScheme = MaterialTheme.colorScheme
 
@@ -1076,61 +1320,202 @@ private fun MoneroToolsSection(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { onSearchClick() }
+                .clickable { onSettingsClick() }
                 .padding(horizontal = 24.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
-                imageVector = Icons.Default.Search,
-                contentDescription = "Search transaction",
+                imageVector = Icons.Default.Settings,
+                contentDescription = "Wallet Settings",
                 modifier = Modifier.size(16.dp),
                 tint = colorScheme.onSurface.copy(alpha = 0.7f)
             )
             Spacer(modifier = Modifier.width(12.dp))
             Text(
-                text = "Search Transaction",
+                text = "Wallet Settings",
                 style = MaterialTheme.typography.bodyMedium,
                 color = colorScheme.onSurface
             )
         }
 
-        if (pendingCount > 0) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onHistoryClick() }
+                .padding(horizontal = 24.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.History,
+                contentDescription = "Transaction history",
+                modifier = Modifier.size(16.dp),
+                tint = colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                text = "Transaction History",
+                style = MaterialTheme.typography.bodyMedium,
+                color = colorScheme.onSurface
+            )
+        }
+    }
+}
+
+@Composable
+private fun WalletDetailsSection(
+    viewModel: ChatViewModel,
+    onShowRestoreWalletDialog: () -> Unit = {}
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    var isExpanded by remember { mutableStateOf(false) }
+    var showSeed by remember { mutableStateOf(false) }
+    val rescanActive = viewModel.isRescanInProgress
+    val rescanQueued = viewModel.isRescanQueued
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { isExpanded = !isExpanded }
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.Info,
+                contentDescription = null,
+                modifier = Modifier.size(12.dp),
+                tint = colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = "WALLET DETAILS",
+                style = MaterialTheme.typography.labelSmall,
+                color = colorScheme.onSurface.copy(alpha = 0.6f),
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f)
+            )
+            IconButton(
+                enabled = !rescanActive,
+                onClick = { viewModel.rescanFromBirthdayBlock() },
+                modifier = Modifier.size(24.dp)
+            ) {
+                if (rescanActive) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(15.dp),
+                        strokeWidth = 2.dp,
+                        color = colorScheme.primary
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Scan wallet from Birthday Block",
+                        modifier = Modifier.size(16.dp),
+                        tint = colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.width(4.dp))
+            IconButton(
+                onClick = onShowRestoreWalletDialog,
+                modifier = Modifier.size(24.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.SwapHoriz,
+                    contentDescription = "Change Wallet / Restore",
+                    modifier = Modifier.size(16.dp),
+                    tint = colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            }
+            Spacer(modifier = Modifier.width(4.dp))
+            Icon(
+                imageVector = if (isExpanded) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowUp,
+                contentDescription = if (isExpanded) "Collapse Wallet Details" else "Expand Wallet Details",
+                modifier = Modifier.size(18.dp),
+                tint = colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+        }
+
+        if (rescanActive) {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onPendingClick() }
-                    .padding(horizontal = 24.dp, vertical = 8.dp),
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
-                    imageVector = Icons.Default.HourglassEmpty,
-                    contentDescription = "Pending transactions",
-                    modifier = Modifier.size(16.dp),
-                    tint = Color(0xFFFF9800)
+                    imageVector = if (rescanQueued) Icons.Default.Schedule else Icons.Default.Sync,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = colorScheme.primary
                 )
-                Spacer(modifier = Modifier.width(12.dp))
+                Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "Pending Transactions",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = colorScheme.onSurface,
-                    modifier = Modifier.weight(1f)
+                    text = if (rescanQueued) {
+                        "Wallet is syncing; scan will start automatically"
+                    } else {
+                        "Scanning wallet from Birthday Block…"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colorScheme.onSurface.copy(alpha = 0.75f)
                 )
-                Box(
-                    modifier = Modifier
-                        .background(Color(0xFFFF9800), shape = RoundedCornerShape(10.dp))
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                        .defaultMinSize(minWidth = 20.dp, minHeight = 16.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = pendingCount.toString(),
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        ),
-                        color = Color.White
-                    )
+            }
+        }
+
+        if (isExpanded) {
+            // Address
+            Column(modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp)) {
+                Text("Address", style = MaterialTheme.typography.labelSmall, color = colorScheme.onSurface.copy(alpha = 0.7f))
+                Text(
+                    text = viewModel.myWalletAddress.collectAsStateWithLifecycle().value ?: "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colorScheme.onSurface
+                )
+            }
+
+            // Seed
+            Column(modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Seed Phrase", style = MaterialTheme.typography.labelSmall, color = colorScheme.onSurface.copy(alpha = 0.7f), modifier = Modifier.weight(1f))
+                    IconButton(onClick = {
+                        if (!showSeed) viewModel.fetchSeed()
+                        showSeed = !showSeed
+                    }, modifier = Modifier.size(24.dp)) {
+                        Icon(
+                            imageVector = if (showSeed) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                            contentDescription = "Toggle Seed Phrase Visibility",
+                            modifier = Modifier.size(16.dp),
+                            tint = colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                    }
                 }
+                Text(
+                    text = if (showSeed) viewModel.walletSeed else "••••••••••••••••••••••••••••••••",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colorScheme.onSurface
+                )
+            }
+
+            // Network Height
+            Column(modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp)) {
+                Text("Sync Height / Network", style = MaterialTheme.typography.labelSmall, color = colorScheme.onSurface.copy(alpha = 0.7f))
+                Text(
+                    text = "${viewModel.walletHeight} / ${viewModel.daemonHeight}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colorScheme.onSurface
+                )
+            }
+
+            // Balance
+            Column(modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp)) {
+                Text("Balance", style = MaterialTheme.typography.labelSmall, color = colorScheme.onSurface.copy(alpha = 0.7f))
+                Text(
+                    text = "Total: ${viewModel.totalBalance} XMR",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colorScheme.onSurface
+                )
+                Text(
+                    text = "Unlocked: ${viewModel.currentBalance} XMR",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colorScheme.onSurface.copy(alpha = 0.7f)
+                )
             }
         }
     }

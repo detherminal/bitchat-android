@@ -1,5 +1,6 @@
 package com.m2049r.xmrwallet.model;
 
+import android.util.Log;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.List;
@@ -17,14 +18,14 @@ public class WalletManager {
     private static WalletManager instance;
 
     /* ===== CONFIGURATION FIELDS ===== */
-    private String walletName;
-    private String walletPassword;
-    private String walletLanguage;
-    private String daemonAddress;
-    private int daemonPort;
+    private String walletName = "bitchat_wallet";
+    private String walletPassword = "bitchat_secure_pass";
+    private String walletLanguage = "English";
+    private String daemonAddress = "xmr-node.cakewallet.com";
+    private int daemonPort = 18081;
     private String daemonUsername = "";
     private String daemonPassword = "";
-    private NetworkType networkType = NetworkType.NetworkType_Stagenet; // default
+    private NetworkType networkType = NetworkType.NetworkType_Mainnet; // default Mainnet
     private boolean forceSsl;
 
     /* ===== STATE ===== */
@@ -42,14 +43,14 @@ public class WalletManager {
 
     /* ===== CONFIGURATION LOADERS ===== */
     public void applyConfiguration(Properties props) {
-        this.walletName = props.getProperty("wallet.name", "bitchat_wallet_stagenet");
+        this.walletName = props.getProperty("wallet.name", "bitchat_wallet");
         this.walletPassword = props.getProperty("wallet.password", "bitchat_secure_pass");
         this.walletLanguage = props.getProperty("wallet.language", "English");
-        this.daemonAddress = props.getProperty("daemon.address", "stagenet.xmr-tw.org");
-        this.daemonPort = Integer.parseInt(props.getProperty("daemon.port", "38081"));
+        this.daemonAddress = props.getProperty("daemon.address", "xmr-node.cakewallet.com");
+        this.daemonPort = Integer.parseInt(props.getProperty("daemon.port", "18081"));
         this.daemonUsername = props.getProperty("daemon.username", "");
         this.daemonPassword = props.getProperty("daemon.password", "");
-        int netInt = Integer.parseInt(props.getProperty("network.type", "2"));
+        int netInt = Integer.parseInt(props.getProperty("network.type", "0"));
         this.networkType = fromInt(netInt);
         this.forceSsl = Boolean.parseBoolean(props.getProperty("daemon.ssl", "false"));
     }
@@ -84,6 +85,7 @@ public class WalletManager {
         node.setUsername(daemonUsername);
         node.setPassword(daemonPassword);
         node.setNetworkType(networkType);
+        node.setSsl(forceSsl);
         return node;
     }
 
@@ -100,8 +102,11 @@ public class WalletManager {
     /* ===== JNI BINDINGS ===== */
     public native long createWalletJ(String path, String password, String language, int nettype);
     public native long openWalletJ(String path, String password, int nettype);
-    public native long recoveryWalletJ(String path, String password, String mnemonic,
+    public native long recoveryWalletJ(String path, String password, String mnemonic, String offset,
                                        int nettype, long restoreHeight);
+    public native long createWalletFromKeysJ(String path, String password, String language,
+                                             int nettype, long restoreHeight,
+                                             String addressString, String viewKeyString, String spendKeyString);
 
     private native boolean verifyWalletPasswordJ(String keysFileName, String password, boolean noSpendKey);
     private native String getErrorStringJ();
@@ -155,18 +160,82 @@ public class WalletManager {
     }
 
     public Wallet createWallet(String path) {
-        long walletHandle = createWalletJ(path, walletPassword, walletLanguage, toInt(networkType));
+        String pass = (walletPassword != null && !walletPassword.isEmpty()) ? walletPassword : "bitchat_secure_pass";
+        String lang = (walletLanguage != null && !walletLanguage.isEmpty()) ? walletLanguage : "English";
+        long walletHandle = createWalletJ(path, pass, lang, toInt(networkType));
         return walletHandle != 0 ? new Wallet(walletHandle) : null;
     }
 
     public Wallet openWallet(String path) {
-        long walletHandle = openWalletJ(path, walletPassword, toInt(networkType));
+        String pass = (walletPassword != null && !walletPassword.isEmpty()) ? walletPassword : "bitchat_secure_pass";
+        long walletHandle = openWalletJ(path, pass, toInt(networkType));
         return walletHandle != 0 ? new Wallet(walletHandle) : null;
     }
 
     public Wallet recoveryWallet(String path, String mnemonic, long restoreHeight) {
-        long walletHandle = recoveryWalletJ(path, walletPassword, mnemonic, toInt(networkType), restoreHeight);
-        return walletHandle != 0 ? new Wallet(walletHandle) : null;
+        String pass = (walletPassword != null && !walletPassword.isEmpty()) ? walletPassword : "bitchat_secure_pass";
+        int net = toInt(networkType != null ? networkType : NetworkType.NetworkType_Mainnet);
+
+        Log.d("WalletManager", "Attempting recoveryWalletJ with pass len: " + pass.length() + ", net: " + net + ", height: " + restoreHeight);
+        long walletHandle = 0;
+        try {
+            walletHandle = recoveryWalletJ(path, pass, mnemonic, "", net, restoreHeight);
+        } catch (Throwable t) {
+            Log.w("WalletManager", "recoveryWalletJ native call exception: " + t.getMessage());
+        }
+
+        if (walletHandle != 0) {
+            Log.i("WalletManager", "✓ recoveryWalletJ succeeded with handle: " + walletHandle);
+            return new Wallet(walletHandle);
+        }
+
+        Log.w("WalletManager", "recoveryWalletJ returned 0, attempting Wallet.recoveryWallet fallback...");
+        try {
+            Wallet w = Wallet.recoveryWallet(path, pass, mnemonic, net, restoreHeight);
+            if (w != null) {
+                Log.i("WalletManager", "✓ Wallet.recoveryWallet fallback succeeded!");
+                return w;
+            }
+        } catch (Throwable t) {
+            Log.w("WalletManager", "Wallet.recoveryWallet fallback failed: " + t.getMessage());
+        }
+
+        return null;
+    }
+
+    public Wallet createWalletFromKeys(String path, String language, long restoreHeight, String address, String viewKey, String spendKey) {
+        String pass = (walletPassword != null && !walletPassword.isEmpty()) ? walletPassword : "bitchat_secure_pass";
+        String lang = (language != null && !language.isEmpty()) ? language : "English";
+        int net = toInt(networkType != null ? networkType : NetworkType.NetworkType_Mainnet);
+        String addr = (address != null) ? address : "";
+        String vKey = (viewKey != null) ? viewKey : "";
+        String sKey = (spendKey != null) ? spendKey : "";
+
+        Log.d("WalletManager", "Attempting createWalletFromKeysJ with pass len: " + pass.length() + ", net: " + net + ", height: " + restoreHeight + ", spendKey len: " + sKey.length());
+        long walletHandle = 0;
+        try {
+            walletHandle = createWalletFromKeysJ(path, pass, lang, net, restoreHeight, addr, vKey, sKey);
+        } catch (Throwable t) {
+            Log.w("WalletManager", "createWalletFromKeysJ native call exception: " + t.getMessage());
+        }
+
+        if (walletHandle != 0) {
+            Log.i("WalletManager", "✓ createWalletFromKeysJ succeeded with handle: " + walletHandle);
+            return new Wallet(walletHandle);
+        }
+
+        Log.w("WalletManager", "createWalletFromKeysJ returned 0, attempting Wallet.createWalletFromKeys fallback...");
+        try {
+            Wallet w = Wallet.createWalletFromKeys(path, pass, lang, net, restoreHeight, addr, vKey, sKey);
+            if (w != null) {
+                Log.i("WalletManager", "✓ Wallet.createWalletFromKeys fallback succeeded!");
+                return w;
+            }
+        } catch (Throwable t) {
+            Log.w("WalletManager", "Wallet.createWalletFromKeys fallback failed: " + t.getMessage());
+        }
+
+        return null;
     }
 
     public boolean verifyWalletPassword(String keysFileName, boolean noSpendKey) {
@@ -203,4 +272,3 @@ public class WalletManager {
     public NetworkType getNetworkType() { return networkType; }
     public boolean isForceSsl() { return forceSsl; }
 }
-

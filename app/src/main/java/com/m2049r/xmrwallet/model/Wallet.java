@@ -104,7 +104,7 @@ public class Wallet {
     public native String getDisplayAmount(long amount);
     public native long getAmountFromString(String amount);
     public static native long getAmountFromDouble(double amount);
-    public native void setRefreshFromBlockHeight(long height);
+    // public native void setRefreshFromBlockHeight(long height); // Not implemented in C++ JNI binary
     public native long getRefreshFromBlockHeight();
     public native void setRestoreHeight(long height);
     public native long getRestoreHeight();
@@ -149,10 +149,11 @@ public class Wallet {
     private native long createTransactionJ(String dst_addr, String payment_id, long amount, int mixin_count, int priority, int accountIndex);
     
     public PendingTransaction createTransaction(String dst_addr, String payment_id, long amount, int mixin_count, int priority, int accountIndex) {
+        disposePendingTransaction();
         long txHandle = createTransactionJ(dst_addr, payment_id, amount, mixin_count, priority, accountIndex);
-        PendingTransaction pendingTransaction = new PendingTransaction(txHandle);
+        pendingTransaction = new PendingTransaction(txHandle);
         return pendingTransaction;
-    }    
+    }
 
     private native long createSweepTransaction(String dst_addr, String payment_id, int mixin_count, int priority, int accountIndex);
 
@@ -457,8 +458,17 @@ public class Wallet {
         super.finalize();
     }
 
-    public boolean close() {
-        return WalletManager.getInstance().close(this);
+    public synchronized boolean close() {
+        if (handle == 0) {
+            return true;
+        }
+        boolean result = false;
+        try {
+            result = WalletManager.getInstance().close(this);
+        } catch (Throwable t) {
+            Log.w("Wallet", "Error closing native wallet handle: " + handle, t);
+        }
+        handle = 0;
+        return result;
     }
 }
-

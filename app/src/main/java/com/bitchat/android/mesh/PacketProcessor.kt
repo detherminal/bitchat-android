@@ -125,7 +125,9 @@ class PacketProcessor(private val myPeerID: String) {
 
         // Basic validation and security checks
         if (!delegate?.validatePacketSecurity(packet, peerID)!!) {
-            Log.d(TAG, "Packet failed security validation from ${formatPeerForLog(peerID)}")
+            // SecurityManager logs the specific rejection reason. Avoid a second,
+            // generic message that makes expected duplicate suppression look like
+            // a cryptographic validation failure.
             return
         }
 

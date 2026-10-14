@@ -22,6 +22,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.bitchat.android.R
+import com.bitchat.android.geohash.ChannelID
+import com.bitchat.android.nostr.GeohashAliasRegistry
+import com.bitchat.android.nostr.GeohashConversationRegistry
 
 /**
  * GeohashPeopleList - iOS-compatible component for displaying geohash participants
@@ -51,6 +54,39 @@ fun GeohashPeopleList(
     val isTeleported by viewModel.isTeleported.collectAsStateWithLifecycle()
     val nickname by viewModel.nickname.collectAsStateWithLifecycle()
     val unreadPrivateMessages by viewModel.unreadPrivateMessages.collectAsStateWithLifecycle()
+    val privateChats by viewModel.privateChats.collectAsStateWithLifecycle()
+    val peerNicknames by viewModel.peerNicknames.collectAsStateWithLifecycle()
+
+    // Presence events expire after a few minutes. Keep a previously opened
+    // Nostr DM reachable in the active geohash even when the other peer is
+    // temporarily offline; this is also where Nostr-only conversations are
+    // expected to appear instead of the Bluetooth people list.
+    val knownNostrPeople = remember(privateChats, selectedLocationChannel, peerNicknames) {
+        val geohash = (selectedLocationChannel as? ChannelID.Location)?.channel?.geohash
+        if (geohash == null) {
+            emptyList()
+        } else {
+            privateChats.keys
+                .filter { key ->
+                    key.startsWith("nostr_") && GeohashConversationRegistry.get(key) == geohash
+                }
+                .mapNotNull { key ->
+                    val pubkey = GeohashAliasRegistry.get(key)?.lowercase() ?: return@mapNotNull null
+                    val latestMessage = privateChats[key].orEmpty().maxByOrNull { it.timestamp }
+                    GeoPerson(
+                        id = pubkey,
+                        displayName = peerNicknames[key]
+                            ?: latestMessage?.sender
+                            ?: key.take(12),
+                        lastSeen = latestMessage?.timestamp ?: Date(0)
+                    )
+                }
+        }
+    }
+
+    val displayedPeople = remember(geohashPeople, knownNostrPeople) {
+        (geohashPeople + knownNostrPeople).distinctBy { it.id.lowercase() }
+    }
     
     Column {
         // Header matching iOS style
@@ -77,7 +113,7 @@ fun GeohashPeopleList(
             )
         }
         
-        if (geohashPeople.isEmpty()) {
+        if (displayedPeople.isEmpty()) {
             // Empty state - matches iOS "nobody around..."
             Text(
                 text = stringResource(R.string.nobody_around),
@@ -109,8 +145,8 @@ fun GeohashPeopleList(
             }
             
             // Sort people: me first, then by lastSeen (matches iOS exactly)
-            val orderedPeople = remember(geohashPeople, myHex) {
-                geohashPeople.sortedWith { a, b ->
+            val orderedPeople = remember(displayedPeople, myHex) {
+                displayedPeople.sortedWith { a, b ->
                     when {
                         myHex != null && a.id == myHex && b.id != myHex -> -1
                         myHex != null && b.id == myHex && a.id != myHex -> 1
@@ -120,9 +156,9 @@ fun GeohashPeopleList(
             }
 
             // Compute base name collisions to decide whether to show hash suffix
-            val baseNameCounts = remember(geohashPeople) {
+            val baseNameCounts = remember(displayedPeople) {
                 val counts = mutableMapOf<String, Int>()
-                geohashPeople.forEach { person ->
+                displayedPeople.forEach { person ->
                     val (b, _) = com.bitchat.android.ui.splitSuffix(person.displayName)
                     counts[b] = (counts[b] ?: 0) + 1
                 }
@@ -268,5 +304,4 @@ private fun GeohashPersonItem(
         Spacer(modifier = Modifier.width(8.dp))
     }
 }
-
 

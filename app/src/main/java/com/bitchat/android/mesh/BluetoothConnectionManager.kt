@@ -233,26 +233,35 @@ class BluetoothConnectionManager(
                 val startServer = isGattServerEnabled()
                 val startClient = isGattClientEnabled()
 
+                var serverStarted = false
                 if (startServer) {
-                    if (!serverManager.start()) {
-                        Log.e(TAG, "Failed to start server manager")
-                        this@BluetoothConnectionManager.isActive = false
-                        return@launch
+                    serverStarted = serverManager.start()
+                    if (serverStarted) {
+                        Log.d(TAG, "GATT Server started")
+                    } else {
+                        // A peripheral/advertiser failure must not prevent central scanning.
+                        Log.e(TAG, "Failed to start server manager; continuing with client discovery")
                     }
-                    Log.d(TAG, "GATT Server started")
                 } else {
                     Log.i(TAG, "GATT Server disabled by debug settings; not starting")
                 }
 
+                var clientStarted = false
                 if (startClient) {
-                    if (!clientManager.start()) {
+                    clientStarted = clientManager.start()
+                    if (clientStarted) {
+                        Log.d(TAG, "GATT Client started")
+                    } else {
                         Log.e(TAG, "Failed to start client manager")
-                        this@BluetoothConnectionManager.isActive = false
-                        return@launch
                     }
-                    Log.d(TAG, "GATT Client started")
                 } else {
                     Log.i(TAG, "GATT Client disabled by debug settings; not starting")
+                }
+
+                if (!serverStarted && !clientStarted) {
+                    this@BluetoothConnectionManager.isActive = false
+                    Log.e(TAG, "Bluetooth services could not start: both GATT roles failed")
+                    return@launch
                 }
                 
                 Log.i(TAG, "Bluetooth services started successfully")

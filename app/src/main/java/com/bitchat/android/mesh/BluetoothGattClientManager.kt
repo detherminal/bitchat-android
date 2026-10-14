@@ -43,7 +43,10 @@ class BluetoothGattClientManager(
     private val bluetoothManager: BluetoothManager = 
         context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
     private val bluetoothAdapter: BluetoothAdapter? = bluetoothManager.adapter
-    private val bleScanner: BluetoothLeScanner? = bluetoothAdapter?.bluetoothLeScanner
+    // Bluetooth may be enabled after this manager is constructed during onboarding. Resolve the
+    // scanner lazily so a temporary null value does not permanently disable discovery.
+    private val bleScanner: BluetoothLeScanner?
+        get() = bluetoothAdapter?.bluetoothLeScanner
 
     private fun isBleTransportEnabled(): Boolean {
         return try {
@@ -235,7 +238,8 @@ class BluetoothGattClientManager(
     private fun startScanning() {
         // Respect debug setting
         val enabled = isClientRoleEnabled()
-        if (!permissionManager.hasBluetoothPermissions() || bleScanner == null || !isActive || !enabled) return
+        val scanner = bleScanner
+        if (!permissionManager.hasBluetoothPermissions() || scanner == null || !isActive || !enabled) return
         
         // Rate limit scan starts to prevent "scanning too frequently" errors
         val currentTime = System.currentTimeMillis()
@@ -327,7 +331,7 @@ class BluetoothGattClientManager(
             lastScanStartTime = currentTime
             isCurrentlyScanning = true
             
-            bleScanner.startScan(scanFilters, powerManager.getScanSettings(), scanCallback)
+            scanner.startScan(scanFilters, powerManager.getScanSettings(), scanCallback)
             Log.d(TAG, "BLE scan started successfully")
         } catch (e: Exception) {
             Log.e(TAG, "Exception starting scan: ${e.message}")
@@ -340,12 +344,13 @@ class BluetoothGattClientManager(
      */
     @Suppress("DEPRECATION")
     private fun stopScanning() {
-        if (!permissionManager.hasBluetoothPermissions() || bleScanner == null) return
+        val scanner = bleScanner
+        if (!permissionManager.hasBluetoothPermissions() || scanner == null) return
         
         if (isCurrentlyScanning) {
             try {
                 scanCallback?.let { 
-                    bleScanner.stopScan(it)
+                    scanner.stopScan(it)
                     Log.d(TAG, "BLE scan stopped successfully")
                 }
             } catch (e: Exception) {

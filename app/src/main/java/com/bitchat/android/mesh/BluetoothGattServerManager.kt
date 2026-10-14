@@ -39,7 +39,10 @@ class BluetoothGattServerManager(
     private val bluetoothManager: BluetoothManager = 
         context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
     private val bluetoothAdapter: BluetoothAdapter? = bluetoothManager.adapter
-    private val bleAdvertiser: BluetoothLeAdvertiser? = bluetoothAdapter?.bluetoothLeAdvertiser
+    // Bluetooth may be enabled after this manager is constructed during onboarding. Resolve the
+    // advertiser lazily so a temporary null value does not permanently disable advertising.
+    private val bleAdvertiser: BluetoothLeAdvertiser?
+        get() = bluetoothAdapter?.bluetoothLeAdvertiser
     
     // GATT server for peripheral mode
     private var gattServer: BluetoothGattServer? = null
@@ -338,6 +341,7 @@ class BluetoothGattServerManager(
     private fun startAdvertising() {
         // Respect debug setting
         val enabled = isServerRoleEnabled()
+        val advertiser = bleAdvertiser
 
         // Guard conditions – never throw here to avoid crashing the app from a background coroutine
         if (!permissionManager.hasBluetoothPermissions()) {
@@ -356,7 +360,7 @@ class BluetoothGattServerManager(
             Log.i(TAG, "Not starting advertising: GATT Server disabled via debug settings")
             return
         }
-        if (bleAdvertiser == null) {
+        if (advertiser == null) {
             Log.w(TAG, "Not starting advertising: BLE advertiser not available on this device")
             return
         }
@@ -424,7 +428,7 @@ class BluetoothGattServerManager(
         }
         
         try {
-            bleAdvertiser.startAdvertising(settings, data, scanResponse, advertiseCallback)
+            advertiser.startAdvertising(settings, data, scanResponse, advertiseCallback)
         } catch (se: SecurityException) {
             Log.e(TAG, "SecurityException starting advertising (missing permission?): ${se.message}")
         } catch (e: Exception) {
@@ -437,9 +441,10 @@ class BluetoothGattServerManager(
      */
     @Suppress("DEPRECATION")
     private fun stopAdvertising() {
-        if (!permissionManager.hasBluetoothPermissions() || bleAdvertiser == null) return
+        val advertiser = bleAdvertiser
+        if (!permissionManager.hasBluetoothPermissions() || advertiser == null) return
         try {
-            advertiseCallback?.let { cb -> bleAdvertiser.stopAdvertising(cb) }
+            advertiseCallback?.let { cb -> advertiser.stopAdvertising(cb) }
         } catch (e: Exception) {
             Log.w(TAG, "Error stopping advertising: ${e.message}")
         }

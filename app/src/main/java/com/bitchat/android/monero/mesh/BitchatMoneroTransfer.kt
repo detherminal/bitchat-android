@@ -31,10 +31,9 @@ class BitchatMoneroTransfer(private val context: Context) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val transferScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    // Integration with Bitchat's existing services
-    private var bluetoothMeshService: Any? = null // Will be injected from Bitchat
-    private var encryptionService: Any? = null    // Will be injected from Bitchat
-    private var chatViewModel: Any? = null        // Will be injected from Bitchat
+    // Reuse Bitchat's existing private-message pipeline for encryption,
+    // BLE fragmentation, retry and peer routing.
+    private var directMessageSender: ((peerId: String, content: String) -> Boolean)? = null
 
     // Monero transaction data structures
     data class MoneroTransaction(
@@ -81,18 +80,11 @@ class BitchatMoneroTransfer(private val context: Context) {
      * Initialize with Bitchat services (called from Bitchat app)
      */
     fun initialize(
-        meshService: Any,
-        encryptionService: Any,
-        viewModel: Any,
+        sendMessage: (peerId: String, content: String) -> Boolean,
         callback: MoneroTransferCallback
     ) {
-        this.bluetoothMeshService = meshService
-        this.encryptionService = encryptionService
-        this.chatViewModel = viewModel
+        this.directMessageSender = sendMessage
         this.transferCallback = callback
-
-        // Register for Bitchat message handling
-        registerMoneroMessageHandler()
     }
 
     /**
@@ -106,18 +98,17 @@ class BitchatMoneroTransfer(private val context: Context) {
     ) = withContext(Dispatchers.IO) {
 
         try {
-            // Create transaction file in Bitchat's format
-            val txFile = createTransactionFile(transaction)
-            val metadata = createTransactionMetadata(txFile, transaction)
+            val sender = directMessageSender
+                ?: throw IllegalStateException("Monero message transport is not initialized")
+            if (targetPeer.isBlank()) throw IllegalArgumentException("Target peer is empty")
+            if (transaction.blob.isBlank()) throw IllegalArgumentException("Transaction blob is empty")
 
-            // Fragment the transaction for mesh transmission
-            val fragments = fragmentTransaction(txFile, metadata)
-
-            // Send through Bitchat's mesh network
-            sendToSpecificPeer(fragments, targetPeer)
-
-            // Cleanup temporary file
-            txFile.delete()
+            // MoneroMessageHandler parses this prefix on the receiving device.
+            // The existing private-message transport owns encryption, BLE
+            // fragmentation and peer routing; no second custom stack is needed.
+            if (!sender(targetPeer, "[XMR_TX_BLOB]${transaction.blob}")) {
+                throw IllegalStateException("Monero message could not be queued")
+            }
 
             callback?.onTransactionSent(true, transaction.txHash, targetPeer)
             transferCallback?.onTransactionSent(true, transaction.txHash, targetPeer)
@@ -140,19 +131,6 @@ class BitchatMoneroTransfer(private val context: Context) {
         } else {
             broadcastBitchatMessage(requestMessage, TRANSACTION_CHANNEL)
         }
-    }
-
-    /**
-     * Handle incoming Bitchat messages for Monero transactions
-     */
-    private fun registerMoneroMessageHandler() {
-        // This would integrate with Bitchat's existing message handler
-        // Pseudo-code for integration:
-        /*
-        bitchatMessageHandler.registerCustomHandler(TX_MESSAGE_TYPE) { message, fromPeer ->
-            handleIncomingMoneroMessage(message, fromPeer)
-        }
-        */
     }
 
     /**
@@ -393,9 +371,6 @@ class BitchatMoneroTransfer(private val context: Context) {
             // Parse transaction from reconstructed data
             val transaction = parseTransactionFromData(reconstructedData, fromPeer)
 
-            // Store in Bitchat's secure storage if needed
-            saveReceivedTransaction(transaction, metadata)
-
             // Notify callback
             mainHandler.post {
                 transferCallback?.onTransactionReceived(transaction, fromPeer)
@@ -461,15 +436,11 @@ class BitchatMoneroTransfer(private val context: Context) {
      * Integration helpers for Bitchat services
      */
     private suspend fun sendBitchatMessage(data: ByteArray, targetPeer: String) {
-        // This would integrate with Bitchat's mesh service
-        // Pseudo-code:
-        /*
-        bluetoothMeshService?.sendDirectMessage(
-            data = data,
-            messageType = TX_MESSAGE_TYPE,
-            targetPeer = targetPeer
-        )
-        */
+        val sender = directMessageSender
+            ?: throw IllegalStateException("Monero message transport is not initialized")
+        if (!sender(targetPeer, String(data, Charsets.UTF_8))) {
+            throw IllegalStateException("Monero message could not be queued")
+        }
     }
     
     fun saveAndSubmitTransaction(
@@ -480,10 +451,6 @@ class BitchatMoneroTransfer(private val context: Context) {
     ) {
         try {
             val decodedBytes = decodeBase64(transaction.blob)
-
-            val file = File(context.filesDir, "rx_${transaction.txHash}.raw")
-            file.writeBytes(decodedBytes)
-            Log.i(TAG, "Saved received transaction to ${file.absolutePath}")
 
             walletSuite.submitTxBlob(decodedBytes, object : WalletSuite.TxBlobCallback {
                 override fun onSuccess(txHash: String, base64Blob: String) {
@@ -503,23 +470,13 @@ class BitchatMoneroTransfer(private val context: Context) {
     }
     
     private suspend fun broadcastBitchatMessage(data: ByteArray, channel: String) {
-        // This would integrate with Bitchat's channel broadcasting
-        // Pseudo-code:
-        /*
-        bluetoothMeshService?.broadcastToChannel(
-            data = data,
-            messageType = TX_MESSAGE_TYPE,
-            channel = channel
+        throw UnsupportedOperationException(
+            "Broadcast transaction requests are not supported; request a transaction from a specific peer"
         )
-        */
     }
 
     private suspend fun joinMoneroChannel() {
-        // Join the dedicated Monero transaction channel
-        // Pseudo-code:
-        /*
-        chatViewModel?.executeCommand("/j $TRANSACTION_CHANNEL")
-        */
+        throw UnsupportedOperationException("Monero transaction broadcast channel is not supported")
     }
 
     private fun getCurrentBitchatNickname(): String {
@@ -529,11 +486,6 @@ class BitchatMoneroTransfer(private val context: Context) {
         return chatViewModel?.getCurrentNickname() ?: "Anonymous"
         */
         return "BitchatUser" // Placeholder
-    }
-
-    private fun saveReceivedTransaction(transaction: MoneroTransaction, metadata: TransactionMetadata) {
-        // Save to Bitchat's EncryptedSharedPreferences if needed
-        // This could be optional based on user settings
     }
 
     /**
@@ -548,44 +500,52 @@ class BitchatMoneroTransfer(private val context: Context) {
      * Utility functions
      */
     private fun serializeTransactionPacket(packet: TransactionPacket): ByteArray {
-        // Simple serialization - in production use proper binary format
-        val json = """
-            {
-                "id": "${packet.id}",
-                "fragmentIndex": ${packet.fragmentIndex},
-                "totalFragments": ${packet.totalFragments},
-                "isComplete": ${packet.isComplete},
-                "data": "${encodeBase64(packet.data)}",
-                "metadata": ${if (packet.metadata != null) serializeMetadata(packet.metadata) else "null"}
-            }
-        """.trimIndent()
-
-        return json.toByteArray(Charsets.UTF_8)
+        val json = org.json.JSONObject().apply {
+            put("id", packet.id)
+            put("fragmentIndex", packet.fragmentIndex)
+            put("totalFragments", packet.totalFragments)
+            put("isComplete", packet.isComplete)
+            put("data", encodeBase64(packet.data))
+            put("metadata", packet.metadata?.let { org.json.JSONObject(serializeMetadata(it)) }
+                ?: org.json.JSONObject.NULL)
+        }
+        return json.toString().toByteArray(Charsets.UTF_8)
     }
 
     private fun deserializeTransactionPacket(data: ByteArray): TransactionPacket {
         val json = org.json.JSONObject(String(data, Charsets.UTF_8))
+        val metadataJson = json.optJSONObject("metadata")
+        val metadata = metadataJson?.let { value ->
+            TransactionMetadata(
+                fileName = value.optString("fileName", "transaction.monerotx"),
+                fileSize = value.optLong("fileSize", 0L),
+                checksum = value.optString("checksum", ""),
+                txHash = value.optString("txHash", "").takeIf { it.isNotEmpty() },
+                fee = if (value.has("fee")) value.optLong("fee") else null,
+                timestamp = value.optLong("timestamp", System.currentTimeMillis()),
+                senderNickname = value.optString("senderNickname", "").takeIf { it.isNotEmpty() }
+            )
+        }
         return TransactionPacket(
             id = json.getString("id"),
             fragmentIndex = json.getInt("fragmentIndex"),
             totalFragments = json.getInt("totalFragments"),
             isComplete = json.getBoolean("isComplete"),
-            data = decodeBase64(json.getString("data"))
+            data = decodeBase64(json.getString("data")),
+            metadata = metadata
         )
     }
 
     private fun serializeMetadata(metadata: TransactionMetadata): String {
-        return """
-            {
-                "fileName": "${metadata.fileName}",
-                "fileSize": ${metadata.fileSize},
-                "checksum": "${metadata.checksum}",
-                "txHash": "${metadata.txHash ?: ""}",
-                "fee": ${metadata.fee ?: 0},
-                "timestamp": ${metadata.timestamp},
-                "senderNickname": "${metadata.senderNickname ?: ""}"
-            }
-        """.trimIndent()
+        return org.json.JSONObject().apply {
+            put("fileName", metadata.fileName)
+            put("fileSize", metadata.fileSize)
+            put("checksum", metadata.checksum)
+            put("txHash", metadata.txHash ?: "")
+            put("fee", metadata.fee ?: 0L)
+            put("timestamp", metadata.timestamp)
+            put("senderNickname", metadata.senderNickname ?: "")
+        }.toString()
     }
 
     private fun generateFileChecksum(file: File): String {
@@ -699,4 +659,3 @@ class BitchatMainActivity : AppCompatActivity() {
     }
 }
 */
-

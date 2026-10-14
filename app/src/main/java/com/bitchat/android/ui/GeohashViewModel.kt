@@ -35,6 +35,7 @@ class GeohashViewModel(
     private val messageManager: MessageManager,
     private val privateChatManager: PrivateChatManager,
     private val meshDelegateHandler: MeshDelegateHandler,
+    private val onMoneroAddressReceived: (peerId: String, address: String) -> Unit,
     private val dataManager: DataManager,
     private val notificationManager: NotificationManager
 ) : AndroidViewModel(application), DefaultLifecycleObserver {
@@ -59,6 +60,7 @@ class GeohashViewModel(
         state = state,
         privateChatManager = privateChatManager,
         meshDelegateHandler = meshDelegateHandler,
+        onMoneroAddressReceived = onMoneroAddressReceived,
         scope = viewModelScope,
         repo = repo,
         dataManager = dataManager
