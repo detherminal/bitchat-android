@@ -44,6 +44,14 @@ This project is released into the public domain. See the [LICENSE](LICENSE.md) f
 - **✅ Dark/Light Themes**: Terminal-inspired aesthetic matching iOS version
 - **✅ Battery Optimization**: Adaptive scanning and power management
 
+## Monero Integration
+
+Bitchat Android includes a Monero payment flow that uses private mesh messaging to exchange payment details and transaction IDs between peers. The included demo shows the user flow from sharing a payment address through reviewing the detected transaction in Transaction History.
+
+[![Watch the Monero integration demo](docs/media/bitchat_with_monero_demo.jpg)](docs/media/bitchat_with_monero_demo.mp4)
+
+[Open the full Monero demo video](docs/media/bitchat_with_monero_demo.mp4) (MP4, 1:27)
+
 ## Android Setup
 
 ### Prerequisites
